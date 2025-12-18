@@ -24,6 +24,31 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
+    - name: Get current version from csproj
+      id: get_version
+      run: |
+        VERSION=$(grep -oP '<Version>\K[^<]+' UnitofWork/UnitofWork.csproj)
+        echo "Current version in csproj: $VERSION"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Check if version exists on NuGet
+      id: check_nuget
+      run: |
+        VERSION="${{ steps.get_version.outputs.version }}"
+        PACKAGE_ID="UnitofWork"
+        echo "Checking if version $VERSION exists on NuGet..."
+        
+        # Try to get package info from NuGet
+        RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "https://api.nuget.org/v3-flatcontainer/$PACKAGE_ID/$VERSION/$PACKAGE_ID.nuspec" || echo "404")
+        
+        if [ "$RESPONSE" = "200" ]; then
+          echo "Version $VERSION already exists on NuGet"
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "Version $VERSION does not exist on NuGet"
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: Restore dependencies
       run: dotnet restore UnitofWork/UnitofWork.csproj
 
@@ -39,7 +64,15 @@ jobs:
       id: pack
 
     - name: List generated packages
-      run: ls -la ./nupkg
+      run: |
+        echo "Generated packages:"
+        ls -la ./nupkg
+        echo ""
+        echo "Package details:"
+        for pkg in ./nupkg/*.nupkg; do
+          echo "Package: $pkg"
+          dotnet nuget locals all --list || true
+        done
 
     - name: Upload NuGet package as artifact
       uses: actions/upload-artifact@v4
@@ -49,7 +82,21 @@ jobs:
         retention-days: 30
 
     - name: Publish to NuGet.org
-      run: dotnet nuget push ./nupkg/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+      if: steps.check_nuget.outputs.exists != 'true'
+      run: |
+        echo "Publishing package to NuGet.org..."
+        dotnet nuget push ./nupkg/*.nupkg \
+          --api-key ${{ secrets.NUGET_API_KEY }} \
+          --source https://api.nuget.org/v3/index.json \
+          --skip-duplicate \
+          --no-symbols
       env:
         NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
+    - name: Skip publish if version exists
+      if: steps.check_nuget.outputs.exists == 'true'
+      run: |
+        echo "⚠️ Version ${{ steps.get_version.outputs.version }} already exists on NuGet.org"
+        echo "Skipping publish. Please update the version in UnitofWork.csproj before pushing."
+        exit 1
 
